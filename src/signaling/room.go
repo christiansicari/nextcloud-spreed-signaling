@@ -584,6 +584,9 @@ func (r *Room) publishActiveSessions() {
 		case *ClientSession:
 			// Use Nextcloud session id
 			sid = sess.RoomSessionId()
+		case *VirtualSession:
+			// Use our internal generated session id (will be added to Nextcloud).
+			sid = sess.PublicId()
 		default:
 			continue
 		}
