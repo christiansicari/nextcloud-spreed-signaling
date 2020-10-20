@@ -117,7 +117,8 @@ type Hub struct {
 	sessions map[uint64]Session
 	rooms    map[string]*Room
 
-	roomSessions RoomSessions
+	roomSessions    RoomSessions
+	virtualSessions map[string]uint64
 
 	decodeCaches []*LruCache
 
@@ -290,7 +291,8 @@ func NewHub(config *goconf.ConfigFile, nats NatsClient, r *mux.Router, version s
 		sessions: make(map[uint64]Session),
 		rooms:    make(map[string]*Room),
 
-		roomSessions: roomSessions,
+		roomSessions:    roomSessions,
+		virtualSessions: make(map[string]uint64),
 
 		decodeCaches: decodeCaches,
 
@@ -623,6 +625,19 @@ func (h *Hub) processNewClient(client *Client) {
 	h.startExpectHello(client)
 }
 
+func (h *Hub) newSessionIdData(backend *Backend) *SessionIdData {
+	sid := atomic.AddUint64(&h.sid, 1)
+	for sid == 0 {
+		sid = atomic.AddUint64(&h.sid, 1)
+	}
+	sessionIdData := &SessionIdData{
+		Sid:       sid,
+		Created:   time.Now(),
+		BackendId: backend.Id(),
+	}
+	return sessionIdData
+}
+
 func (h *Hub) processRegister(client *Client, message *ClientMessage, backend *Backend, auth *BackendClientResponse) {
 	if !client.IsConnected() {
 		// Client disconnected while waiting for "hello" response.
@@ -641,11 +656,7 @@ func (h *Hub) processRegister(client *Client, message *ClientMessage, backend *B
 	for sid == 0 {
 		sid = atomic.AddUint64(&h.sid, 1)
 	}
-	sessionIdData := &SessionIdData{
-		Sid:       sid,
-		Created:   time.Now(),
-		BackendId: backend.Id(),
-	}
+	sessionIdData := h.newSessionIdData(backend)
 	privateSessionId, err := h.encodeSessionId(sessionIdData, privateSessionName)
 	if err != nil {
 		client.SendMessage(message.NewWrappedErrorServerMessage(err))
@@ -755,6 +766,8 @@ func (h *Hub) processMessage(client *Client, data []byte) {
 		h.processMessageMsg(client, &message)
 	case "control":
 		h.processControlMsg(client, &message)
+	case "internal":
+		h.processInternalMsg(client, &message)
 	case "bye":
 		h.processByeMsg(client, &message)
 	case "hello":
@@ -1147,6 +1160,7 @@ func (h *Hub) processMessageMsg(client *Client, message *ClientMessage) {
 	var recipient *Client
 	var subject string
 	var clientData *MessageClientMessageData
+	var serverRecipient *MessageClientMessageRecipient
 	switch msg.Recipient.Type {
 	case RecipientTypeSession:
 		data := h.decodeSessionId(msg.Recipient.SessionId, publicSessionName)
@@ -1188,6 +1202,21 @@ func (h *Hub) processMessageMsg(client *Client, message *ClientMessage) {
 			subject = "session." + msg.Recipient.SessionId
 			h.mu.RLock()
 			recipient = h.clients[data.Sid]
+			if recipient == nil {
+				// Send to client connection for virtual sessions.
+				sess := h.sessions[data.Sid]
+				if sess != nil && sess.ClientType() == HelloClientTypeVirtual {
+					virtualSession := sess.(*VirtualSession)
+					clientSession := virtualSession.Session()
+					subject = "session." + clientSession.PublicId()
+					recipient = clientSession.GetClient()
+					// The client should see his session id as recipient.
+					serverRecipient = &MessageClientMessageRecipient{
+						Type:      "session",
+						SessionId: virtualSession.SessionId(),
+					}
+				}
+			}
 			h.mu.RUnlock()
 		}
 	case RecipientTypeUser:
@@ -1251,7 +1280,8 @@ func (h *Hub) processMessageMsg(client *Client, message *ClientMessage) {
 				SessionId: session.PublicId(),
 				UserId:    session.UserId(),
 			},
-			Data: msg.Data,
+			Recipient: serverRecipient,
+			Data:      msg.Data,
 		},
 	}
 	if recipient != nil {
@@ -1312,6 +1342,7 @@ func (h *Hub) processControlMsg(client *Client, message *ClientMessage) {
 
 	var recipient *Client
 	var subject string
+	var serverRecipient *MessageClientMessageRecipient
 	switch msg.Recipient.Type {
 	case RecipientTypeSession:
 		data := h.decodeSessionId(msg.Recipient.SessionId, publicSessionName)
@@ -1324,6 +1355,21 @@ func (h *Hub) processControlMsg(client *Client, message *ClientMessage) {
 			subject = "session." + msg.Recipient.SessionId
 			h.mu.RLock()
 			recipient = h.clients[data.Sid]
+			if recipient == nil {
+				// Send to client connection for virtual sessions.
+				sess := h.sessions[data.Sid]
+				if sess != nil && sess.ClientType() == HelloClientTypeVirtual {
+					virtualSession := sess.(*VirtualSession)
+					clientSession := virtualSession.Session()
+					subject = "session." + clientSession.PublicId()
+					recipient = clientSession.GetClient()
+					// The client should see his session id as recipient.
+					serverRecipient = &MessageClientMessageRecipient{
+						Type:      "session",
+						SessionId: virtualSession.SessionId(),
+					}
+				}
+			}
 			h.mu.RUnlock()
 		}
 	case RecipientTypeUser:
@@ -1357,13 +1403,85 @@ func (h *Hub) processControlMsg(client *Client, message *ClientMessage) {
 				SessionId: session.PublicId(),
 				UserId:    session.UserId(),
 			},
-			Data: msg.Data,
+			Recipient: serverRecipient,
+			Data:      msg.Data,
 		},
 	}
 	if recipient != nil {
 		recipient.SendMessage(response)
 	} else {
 		h.nats.PublishMessage(subject, response)
+	}
+}
+
+func (h *Hub) processInternalMsg(client *Client, message *ClientMessage) {
+	msg := message.Control
+	session := client.GetSession()
+	if session == nil {
+		// Client is not connected yet.
+		return
+	} else if session.ClientType() != HelloClientTypeInternal {
+		log.Printf("Ignore internal message %+v from %s", msg, session.PublicId())
+		return
+	}
+
+	switch message.Internal.Type {
+	case "addsession":
+		msg := message.Internal.AddSession
+		room := h.getRoom(msg.RoomId)
+		if room == nil {
+			log.Printf("Ignore add session message %+v for invalid room %s from %s", *msg, msg.RoomId, session.PublicId())
+			return
+		}
+
+		sessionIdData := h.newSessionIdData(session.Backend())
+		privateSessionId, err := h.encodeSessionId(sessionIdData, privateSessionName)
+		if err != nil {
+			log.Printf("Could not encode private virtual session id: %s", err)
+			return
+		}
+		publicSessionId, err := h.encodeSessionId(sessionIdData, publicSessionName)
+		if err != nil {
+			log.Printf("Could not encode public virtual session id: %s", err)
+			return
+		}
+
+		virtualSessionId := GetVirtualSessionId(session, msg.SessionId)
+		sess := NewVirtualSession(session, privateSessionId, publicSessionId, sessionIdData, msg)
+		h.mu.Lock()
+		h.sessions[sessionIdData.Sid] = sess
+		h.virtualSessions[virtualSessionId] = sessionIdData.Sid
+		h.mu.Unlock()
+		log.Printf("Session %s added virtual session %s", session.PublicId(), sess.PublicId())
+		session.AddVirtualSession(sess)
+		sess.SetRoom(room)
+		room.AddSession(sess, nil)
+	case "removesession":
+		msg := message.Internal.RemoveSession
+		room := h.getRoom(msg.RoomId)
+		if room == nil {
+			log.Printf("Ignore remove session message %+v for invalid room %s from %s", *msg, msg.RoomId, session.PublicId())
+			return
+		}
+
+		virtualSessionId := GetVirtualSessionId(session, msg.SessionId)
+		h.mu.Lock()
+		sid, found := h.virtualSessions[virtualSessionId]
+		if !found {
+			h.mu.Unlock()
+			return
+		}
+
+		delete(h.virtualSessions, virtualSessionId)
+		sess := h.sessions[sid]
+		h.mu.Unlock()
+		if sess != nil {
+			log.Printf("Session %s removed virtual session %s", session.PublicId(), sess.PublicId())
+			sess.Close()
+		}
+	default:
+		log.Printf("Ignore unsupported internal message %+v from %s", message.Internal, session.PublicId())
+		return
 	}
 }
 

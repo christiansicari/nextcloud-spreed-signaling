@@ -82,6 +82,8 @@ type ClientSession struct {
 	pendingClientMessages        []*ServerMessage
 	hasPendingChat               bool
 	hasPendingParticipantsUpdate bool
+
+	virtualSessions map[*VirtualSession]bool
 }
 
 func NewClientSession(hub *Hub, privateId string, publicId string, data *SessionIdData, backend *Backend, hello *HelloClientMessage, auth *BackendClientAuthResponse) (*ClientSession, error) {
@@ -293,6 +295,12 @@ func (s *ClientSession) closeAndWait(wait bool) {
 		s.sessionSubscription.Unsubscribe()
 		s.sessionSubscription = nil
 	}
+	go func(virtualSessions map[*VirtualSession]bool) {
+		for session, _ := range virtualSessions {
+			session.Close()
+		}
+	}(s.virtualSessions)
+	s.virtualSessions = nil
 	s.releaseMcuObjects()
 	s.clearClientLocked(nil)
 	if atomic.CompareAndSwapInt32(&s.running, 1, 0) {
@@ -782,4 +790,19 @@ func (s *ClientSession) NotifySessionResumed(client *Client) {
 			room.NotifySessionResumed(client)
 		}
 	}
+}
+
+func (s *ClientSession) AddVirtualSession(session *VirtualSession) {
+	s.mu.Lock()
+	if s.virtualSessions == nil {
+		s.virtualSessions = make(map[*VirtualSession]bool)
+	}
+	s.virtualSessions[session] = true
+	s.mu.Unlock()
+}
+
+func (s *ClientSession) RemoveVirtualSession(session *VirtualSession) {
+	s.mu.Lock()
+	delete(s.virtualSessions, session)
+	s.mu.Unlock()
 }

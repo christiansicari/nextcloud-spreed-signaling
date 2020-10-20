@@ -58,6 +58,7 @@ type Room struct {
 	sessions  map[string]Session
 
 	internalSessions map[Session]bool
+	virtualSessions  map[Session]bool
 	inCallSessions   map[Session]bool
 	roomSessionData  map[string]*RoomSessionData
 
@@ -116,6 +117,7 @@ func NewRoom(roomId string, properties *json.RawMessage, hub *Hub, n NatsClient,
 		sessions:  make(map[string]Session),
 
 		internalSessions: make(map[Session]bool),
+		virtualSessions:  make(map[Session]bool),
 		inCallSessions:   make(map[Session]bool),
 		roomSessionData:  make(map[string]*RoomSessionData),
 
@@ -258,8 +260,11 @@ func (r *Room) AddSession(session Session, sessionData *json.RawMessage) []Sessi
 		}
 	}
 	r.sessions[sid] = session
-	if session.ClientType() == HelloClientTypeInternal {
+	switch session.ClientType() {
+	case HelloClientTypeInternal:
 		r.internalSessions[session] = true
+	case HelloClientTypeVirtual:
+		r.virtualSessions[session] = true
 	}
 	if roomSessionData != nil {
 		r.roomSessionData[sid] = roomSessionData
@@ -290,6 +295,7 @@ func (r *Room) RemoveSession(session Session) bool {
 	sid := session.PublicId()
 	delete(r.sessions, sid)
 	delete(r.internalSessions, session)
+	delete(r.virtualSessions, session)
 	delete(r.inCallSessions, session)
 	delete(r.roomSessionData, sid)
 	if len(r.sessions) > 0 {
@@ -405,6 +411,14 @@ func (r *Room) addInternalSessions(users []map[string]interface{}) []map[string]
 			"sessionId": session.PublicId(),
 			"lastPing":  now,
 			"internal":  true,
+		})
+	}
+	for session := range r.virtualSessions {
+		users = append(users, map[string]interface{}{
+			"inCall":    true,
+			"sessionId": session.PublicId(),
+			"lastPing":  now,
+			"virtual":   true,
 		})
 	}
 	r.mu.Unlock()
