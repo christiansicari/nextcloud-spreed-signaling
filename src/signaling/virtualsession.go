@@ -23,10 +23,17 @@ package signaling
 
 import (
 	"encoding/json"
+	"log"
 	"net/url"
 	"sync/atomic"
 	"time"
 	"unsafe"
+)
+
+const (
+	FLAG_MUTED_SPEAKING  = 1
+	FLAG_MUTED_LISTENING = 2
+	FLAG_TALKING         = 4
 )
 
 type VirtualSession struct {
@@ -40,6 +47,7 @@ type VirtualSession struct {
 	sessionId string
 	userId    string
 	userData  *json.RawMessage
+	flags     uint32
 }
 
 func GetVirtualSessionId(session *ClientSession, sessionId string) string {
@@ -56,6 +64,7 @@ func NewVirtualSession(session *ClientSession, privateId string, publicId string
 		sessionId: msg.SessionId,
 		userId:    msg.UserId,
 		userData:  msg.User,
+		flags:     msg.Flags,
 	}
 }
 
@@ -133,4 +142,54 @@ func (s *VirtualSession) Session() *ClientSession {
 
 func (s *VirtualSession) SessionId() string {
 	return s.sessionId
+}
+
+func (s *VirtualSession) AddFlags(flags uint32) bool {
+	for {
+		old := atomic.LoadUint32(&s.flags)
+		if old&flags == flags {
+			// Flags already set.
+			return false
+		}
+		newFlags := old | flags
+		if atomic.CompareAndSwapUint32(&s.flags, old, newFlags) {
+			log.Printf("Flags for session %s now %d (added %d)", s.PublicId(), newFlags, flags)
+			return true
+		}
+		// Another thread updated the flags while we were checking, retry.
+	}
+}
+
+func (s *VirtualSession) RemoveFlags(flags uint32) bool {
+	for {
+		old := atomic.LoadUint32(&s.flags)
+		if old&flags == 0 {
+			// Flags not set.
+			return false
+		}
+		newFlags := old & ^flags
+		if atomic.CompareAndSwapUint32(&s.flags, old, newFlags) {
+			log.Printf("Flags for session %s now %d (removed %d)", s.PublicId(), newFlags, flags)
+			return true
+		}
+		// Another thread updated the flags while we were checking, retry.
+	}
+}
+
+func (s *VirtualSession) SetFlags(flags uint32) bool {
+	for {
+		old := atomic.LoadUint32(&s.flags)
+		if old == flags {
+			return false
+		}
+
+		if atomic.CompareAndSwapUint32(&s.flags, old, flags) {
+			log.Printf("Flags for session %s now %d", s.PublicId(), flags)
+			return true
+		}
+	}
+}
+
+func (s *VirtualSession) Flags() uint32 {
+	return atomic.LoadUint32(&s.flags)
 }

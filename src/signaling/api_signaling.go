@@ -458,6 +458,7 @@ type AddSessionInternalClientMessage struct {
 
 	UserId string           `json:"userid,omitempty"`
 	User   *json.RawMessage `json:"user,omitempty"`
+	Flags  uint32           `json:"flags,omitempty"`
 }
 
 func (m *AddSessionInternalClientMessage) CheckValid() error {

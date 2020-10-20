@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/url"
 	"sync"
@@ -58,7 +59,7 @@ type Room struct {
 	sessions  map[string]Session
 
 	internalSessions map[Session]bool
-	virtualSessions  map[Session]bool
+	virtualSessions  map[*VirtualSession]bool
 	inCallSessions   map[Session]bool
 	roomSessionData  map[string]*RoomSessionData
 
@@ -117,7 +118,7 @@ func NewRoom(roomId string, properties *json.RawMessage, hub *Hub, n NatsClient,
 		sessions:  make(map[string]Session),
 
 		internalSessions: make(map[Session]bool),
-		virtualSessions:  make(map[Session]bool),
+		virtualSessions:  make(map[*VirtualSession]bool),
 		inCallSessions:   make(map[Session]bool),
 		roomSessionData:  make(map[string]*RoomSessionData),
 
@@ -264,7 +265,13 @@ func (r *Room) AddSession(session Session, sessionData *json.RawMessage) []Sessi
 	case HelloClientTypeInternal:
 		r.internalSessions[session] = true
 	case HelloClientTypeVirtual:
-		r.virtualSessions[session] = true
+		virtualSession, ok := session.(*VirtualSession)
+		if !ok {
+			delete(r.sessions, sid)
+			r.mu.Unlock()
+			panic(fmt.Sprintf("Expected a virtual session, got %v", session))
+		}
+		r.virtualSessions[virtualSession] = true
 	}
 	if roomSessionData != nil {
 		r.roomSessionData[sid] = roomSessionData
@@ -295,7 +302,9 @@ func (r *Room) RemoveSession(session Session) bool {
 	sid := session.PublicId()
 	delete(r.sessions, sid)
 	delete(r.internalSessions, session)
-	delete(r.virtualSessions, session)
+	if virtualSession, ok := session.(*VirtualSession); ok {
+		delete(r.virtualSessions, virtualSession)
+	}
 	delete(r.inCallSessions, session)
 	delete(r.roomSessionData, sid)
 	if len(r.sessions) > 0 {
@@ -419,6 +428,7 @@ func (r *Room) addInternalSessions(users []map[string]interface{}) []map[string]
 			"sessionId": session.PublicId(),
 			"lastPing":  now,
 			"virtual":   true,
+			"flags":     session.Flags(),
 		})
 	}
 	r.mu.Unlock()
