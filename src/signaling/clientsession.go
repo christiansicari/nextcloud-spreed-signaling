@@ -98,13 +98,18 @@ func NewClientSession(hub *Hub, privateId string, publicId string, data *Session
 		userId:     auth.UserId,
 		userData:   auth.User,
 
-		backend:          backend,
-		backendUrl:       hello.Auth.Url,
-		parsedBackendUrl: hello.Auth.parsedUrl,
+		backend: backend,
 
 		natsReceiver: make(chan *nats.Msg, 64),
 		stopRun:      make(chan bool, 1),
 		runStopped:   make(chan bool, 1),
+	}
+	if s.clientType == HelloClientTypeInternal {
+		s.backendUrl = hello.Auth.internalParams.Backend
+		s.parsedBackendUrl = hello.Auth.internalParams.parsedBackend
+	} else {
+		s.backendUrl = hello.Auth.Url
+		s.parsedBackendUrl = hello.Auth.parsedUrl
 	}
 	if err := s.SubscribeNats(hub.nats); err != nil {
 		return nil, err

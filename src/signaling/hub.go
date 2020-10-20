@@ -96,10 +96,11 @@ const (
 )
 
 type Hub struct {
-	nats     NatsClient
-	upgrader websocket.Upgrader
-	cookie   *securecookie.SecureCookie
-	info     *HelloServerMessageServer
+	nats         NatsClient
+	upgrader     websocket.Upgrader
+	cookie       *securecookie.SecureCookie
+	info         *HelloServerMessageServer
+	infoInternal *HelloServerMessageServer
 
 	stopped  int32
 	stopChan chan bool
@@ -277,7 +278,12 @@ func NewHub(config *goconf.ConfigFile, nats NatsClient, r *mux.Router, version s
 		},
 		cookie: securecookie.New([]byte(hashKey), blockBytes).MaxAge(0),
 		info: &HelloServerMessageServer{
-			Version: version,
+			Version:  version,
+			Features: DefaultFeatures,
+		},
+		infoInternal: &HelloServerMessageServer{
+			Version:  version,
+			Features: DefaultFeaturesInternal,
 		},
 
 		stopChan: make(chan bool),
@@ -317,29 +323,41 @@ func NewHub(config *goconf.ConfigFile, nats NatsClient, r *mux.Router, version s
 	return hub, nil
 }
 
-func (h *Hub) SetMcu(mcu Mcu) {
-	h.mcu = mcu
+func addFeature(msg *HelloServerMessageServer, feature string) {
 	var newFeatures []string
-	if mcu == nil {
-		for _, f := range h.info.Features {
-			if f != ServerFeatureMcu {
-				newFeatures = append(newFeatures, f)
-			}
-		}
-	} else {
-		log.Printf("Using a timeout of %s for MCU requests", h.mcuTimeout)
-		added := false
-		for _, f := range h.info.Features {
-			newFeatures = append(newFeatures, f)
-			if f == ServerFeatureMcu {
-				added = true
-			}
-		}
-		if !added {
-			newFeatures = append(newFeatures, ServerFeatureMcu)
+	added := false
+	for _, f := range msg.Features {
+		newFeatures = append(newFeatures, f)
+		if f == feature {
+			added = true
 		}
 	}
-	h.info.Features = newFeatures
+	if !added {
+		newFeatures = append(newFeatures, feature)
+	}
+	msg.Features = newFeatures
+}
+
+func removeFeature(msg *HelloServerMessageServer, feature string) {
+	var newFeatures []string
+	for _, f := range msg.Features {
+		if f != feature {
+			newFeatures = append(newFeatures, f)
+		}
+	}
+	msg.Features = newFeatures
+}
+
+func (h *Hub) SetMcu(mcu Mcu) {
+	h.mcu = mcu
+	if mcu == nil {
+		removeFeature(h.info, ServerFeatureMcu)
+		removeFeature(h.infoInternal, ServerFeatureMcu)
+	} else {
+		log.Printf("Using a timeout of %s for MCU requests", h.mcuTimeout)
+		addFeature(h.info, ServerFeatureMcu)
+		addFeature(h.infoInternal, ServerFeatureMcu)
+	}
 }
 
 func (h *Hub) checkOrigin(r *http.Request) bool {
@@ -347,7 +365,11 @@ func (h *Hub) checkOrigin(r *http.Request) bool {
 	return true
 }
 
-func (h *Hub) GetServerInfo() *HelloServerMessageServer {
+func (h *Hub) GetServerInfo(session Session) *HelloServerMessageServer {
+	if session.ClientType() == HelloClientTypeInternal {
+		return h.infoInternal
+	}
+
 	return h.info
 }
 
@@ -786,7 +808,7 @@ func (h *Hub) sendHelloResponse(client *Client, message *ClientMessage, session 
 			SessionId: session.PublicId(),
 			ResumeId:  session.PrivateId(),
 			UserId:    session.UserId(),
-			Server:    h.GetServerInfo(),
+			Server:    h.GetServerInfo(session),
 		},
 	}
 	return client.SendMessage(response)
@@ -1446,7 +1468,20 @@ func (h *Hub) processInternalMsg(client *Client, message *ClientMessage) {
 			return
 		}
 
+		ctx, cancel := context.WithTimeout(context.Background(), h.backendTimeout)
+		defer cancel()
+
 		virtualSessionId := GetVirtualSessionId(session, msg.SessionId)
+
+		request := NewBackendClientSessionRequest(room.Id(), "add", publicSessionId, msg)
+		var response BackendClientSessionResponse
+		if err := h.backend.PerformJSONRequest(ctx, session.ParsedBackendUrl(), request, &response); err != nil {
+			log.Printf("Could not add virtual session %s at backend %s: %s", virtualSessionId, session.BackendUrl(), err)
+			reply := message.NewErrorServerMessage(NewError("add_failed", "Could not add virtual session."))
+			client.SendMessage(reply)
+			return
+		}
+
 		sess := NewVirtualSession(session, privateSessionId, publicSessionId, sessionIdData, msg)
 		h.mu.Lock()
 		h.sessions[sessionIdData.Sid] = sess
@@ -1478,6 +1513,20 @@ func (h *Hub) processInternalMsg(client *Client, message *ClientMessage) {
 		if sess != nil {
 			log.Printf("Session %s removed virtual session %s", session.PublicId(), sess.PublicId())
 			sess.Close()
+
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), h.backendTimeout)
+				defer cancel()
+
+				request := NewBackendClientSessionRequest(room.Id(), "remove", sess.PublicId(), nil)
+				var response BackendClientSessionResponse
+				err := h.backend.PerformJSONRequest(ctx, sess.ParsedBackendUrl(), request, &response)
+				if err != nil {
+					log.Printf("Could not remove virtual session %s from backend %s: %s", sess.PublicId(), sess.BackendUrl(), err)
+					reply := message.NewErrorServerMessage(NewError("remove_failed", "Could not remove virtual session from backend."))
+					client.SendMessage(reply)
+				}
+			}()
 		}
 	default:
 		log.Printf("Ignore unsupported internal message %+v from %s", message.Internal, session.PublicId())

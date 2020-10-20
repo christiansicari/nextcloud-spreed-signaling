@@ -282,7 +282,18 @@ func (m *HelloClientMessage) CheckValid() error {
 }
 
 const (
+	// Features for all clients.
 	ServerFeatureMcu = "mcu"
+
+	// Features for internal clients only.
+	ServerFeatureInternalVirtualSessions = "virtual-sessions"
+)
+
+var (
+	DefaultFeatures         []string
+	DefaultFeaturesInternal []string = []string{
+		ServerFeatureInternalVirtualSessions,
+	}
 )
 
 type HelloServerMessageServer struct {
