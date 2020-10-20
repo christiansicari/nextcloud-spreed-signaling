@@ -468,6 +468,19 @@ func (m *AddSessionInternalClientMessage) CheckValid() error {
 	return nil
 }
 
+type UpdateSessionInternalClientMessage struct {
+	CommonSessionInternalClientMessage
+
+	Flags *uint32 `json:"flags,omitempty"`
+}
+
+func (m *UpdateSessionInternalClientMessage) CheckValid() error {
+	if err := m.CommonSessionInternalClientMessage.CheckValid(); err != nil {
+		return err
+	}
+	return nil
+}
+
 type RemoveSessionInternalClientMessage struct {
 	CommonSessionInternalClientMessage
 }
@@ -484,6 +497,8 @@ type InternalClientMessage struct {
 
 	AddSession *AddSessionInternalClientMessage `json:"addsession,omitempty"`
 
+	UpdateSession *UpdateSessionInternalClientMessage `json:"updatesession,omitempty"`
+
 	RemoveSession *RemoveSessionInternalClientMessage `json:"removesession,omitempty"`
 }
 
@@ -493,6 +508,12 @@ func (m *InternalClientMessage) CheckValid() error {
 		if m.AddSession == nil {
 			return fmt.Errorf("addsession missing")
 		} else if err := m.AddSession.CheckValid(); err != nil {
+			return err
+		}
+	case "updatesession":
+		if m.UpdateSession == nil {
+			return fmt.Errorf("updatesession missing")
+		} else if err := m.UpdateSession.CheckValid(); err != nil {
 			return err
 		}
 	case "removesession":

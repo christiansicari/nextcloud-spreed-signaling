@@ -261,6 +261,7 @@ func (r *Room) AddSession(session Session, sessionData *json.RawMessage) []Sessi
 		}
 	}
 	r.sessions[sid] = session
+	var publishUsersChanged bool
 	switch session.ClientType() {
 	case HelloClientTypeInternal:
 		r.internalSessions[session] = true
@@ -272,6 +273,7 @@ func (r *Room) AddSession(session Session, sessionData *json.RawMessage) []Sessi
 			panic(fmt.Sprintf("Expected a virtual session, got %v", session))
 		}
 		r.virtualSessions[virtualSession] = true
+		publishUsersChanged = true
 	}
 	if roomSessionData != nil {
 		r.roomSessionData[sid] = roomSessionData
@@ -280,6 +282,9 @@ func (r *Room) AddSession(session Session, sessionData *json.RawMessage) []Sessi
 	r.mu.Unlock()
 	if !found {
 		r.PublishSessionJoined(session, roomSessionData)
+		if publishUsersChanged {
+			r.publishUsersChangedWithInternal()
+		}
 	}
 	return result
 }
@@ -570,6 +575,15 @@ func (r *Room) NotifySessionResumed(client *Client) {
 	}
 
 	client.SendMessage(message)
+}
+
+func (r *Room) NotifySessionChanged(session Session) {
+	if session.ClientType() != HelloClientTypeVirtual {
+		// Only notify if a virtual session has changed.
+		return
+	}
+
+	r.publishUsersChangedWithInternal()
 }
 
 func (r *Room) publishUsersChangedWithInternal() {

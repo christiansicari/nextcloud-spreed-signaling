@@ -1487,10 +1487,43 @@ func (h *Hub) processInternalMsg(client *Client, message *ClientMessage) {
 		h.sessions[sessionIdData.Sid] = sess
 		h.virtualSessions[virtualSessionId] = sessionIdData.Sid
 		h.mu.Unlock()
-		log.Printf("Session %s added virtual session %s", session.PublicId(), sess.PublicId())
+		log.Printf("Session %s added virtual session %s with initial flags %d", session.PublicId(), sess.PublicId(), sess.Flags())
 		session.AddVirtualSession(sess)
 		sess.SetRoom(room)
 		room.AddSession(sess, nil)
+	case "updatesession":
+		msg := message.Internal.UpdateSession
+		room := h.getRoom(msg.RoomId)
+		if room == nil {
+			log.Printf("Ignore remove session message %+v for invalid room %s from %s", *msg, msg.RoomId, session.PublicId())
+			return
+		}
+
+		virtualSessionId := GetVirtualSessionId(session, msg.SessionId)
+		h.mu.Lock()
+		sid, found := h.virtualSessions[virtualSessionId]
+		if !found {
+			h.mu.Unlock()
+			return
+		}
+
+		sess := h.sessions[sid]
+		h.mu.Unlock()
+		if sess != nil {
+			update := false
+			if virtualSession, ok := sess.(*VirtualSession); ok {
+				if msg.Flags != nil {
+					if virtualSession.SetFlags(*msg.Flags) {
+						update = true
+					}
+				}
+			} else {
+				log.Printf("Ignore update request for non-virtual session %s", sess.PublicId())
+			}
+			if update {
+				room.NotifySessionChanged(sess)
+			}
+		}
 	case "removesession":
 		msg := message.Internal.RemoveSession
 		room := h.getRoom(msg.RoomId)
